@@ -518,6 +518,12 @@ void iris_free(iris_ctx *ctx) {
     iris_transformer_free_flux(ctx->transformer);
     iris_transformer_free_zimage(ctx->zi_transformer);
 
+#ifdef USE_METAL
+    /* GPU weight caches are keyed by CPU pointer: drop them with the weights
+     * so a later context's allocations cannot match freed addresses. */
+    iris_metal_reset();
+#endif
+
     free(ctx);
 }
 
@@ -555,9 +561,9 @@ void iris_release_text_encoder(iris_ctx *ctx) {
     ctx->qwen3_encoder = NULL;
 
 #ifdef USE_METAL
-    /* Reset all GPU state to ensure clean slate for transformer.
-     * This clears weight caches, activation pools, and pending commands. */
-    iris_metal_reset();
+    /* Drop only the encoder's cached GPU weights (and transient state), so
+     * a resident transformer keeps its GPU copies across generations. */
+    iris_metal_release_weight_caches_since_mark();
 #endif
 }
 
@@ -627,6 +633,9 @@ float *iris_encode_text(iris_ctx *ctx, const char *prompt, int *out_seq_len) {
     /* Load encoder if not already loaded */
     if (!ctx->qwen3_encoder && ctx->model_dir[0]) {
         if (iris_phase_callback) iris_phase_callback("Loading Qwen3 encoder", 0);
+#ifdef USE_METAL
+        iris_metal_mark_weight_caches();
+#endif
         ctx->qwen3_encoder = qwen3_encoder_load(ctx->model_dir, ctx->use_mmap);
         if (iris_phase_callback) iris_phase_callback("Loading Qwen3 encoder", 1);
         if (!ctx->qwen3_encoder) {

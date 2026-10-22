@@ -239,6 +239,7 @@ typedef struct {
 
 static weight_cache_entry_t g_weight_cache[WEIGHT_CACHE_SIZE];
 static int g_weight_cache_count = 0;
+static int g_weight_cache_mark = 0;   /* see iris_metal_mark_weight_caches */
 static pthread_mutex_t g_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static id<MTLBuffer> get_cached_weight_buffer(const float *weights, size_t size) {
@@ -282,6 +283,7 @@ static void clear_weight_cache(void) {
         g_weight_cache[i].cpu_ptr = NULL;
     }
     g_weight_cache_count = 0;
+    g_weight_cache_mark = 0;
     pthread_mutex_unlock(&g_cache_mutex);
 }
 
@@ -895,6 +897,7 @@ typedef struct {
 
 static bf16_cache_entry_t g_bf16_cache[BF16_WEIGHT_CACHE_SIZE];
 static int g_bf16_cache_count = 0;
+static int g_bf16_cache_mark = 0;
 static pthread_mutex_t g_bf16_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* RoPE cache (per forward pass) */
@@ -997,6 +1000,7 @@ static void clear_bf16_cache(void) {
         g_bf16_cache[i].cpu_ptr = NULL;
     }
     g_bf16_cache_count = 0;
+    g_bf16_cache_mark = 0;
     pthread_mutex_unlock(&g_bf16_cache_mutex);
 }
 
@@ -1011,6 +1015,7 @@ typedef struct {
 
 static f16_cache_entry_t g_f16_cache[F16_WEIGHT_CACHE_SIZE];
 static int g_f16_cache_count = 0;
+static int g_f16_cache_mark = 0;
 static pthread_mutex_t g_f16_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Clear f16 weight cache (bf16 converted to f16) */
@@ -1021,6 +1026,7 @@ static void clear_f16_cache(void) {
         g_f16_cache[i].cpu_ptr = NULL;
     }
     g_f16_cache_count = 0;
+    g_f16_cache_mark = 0;
     pthread_mutex_unlock(&g_f16_cache_mutex);
 }
 
@@ -1072,6 +1078,68 @@ static id<MTLBuffer> get_cached_bf16_as_f16_buffer(const uint16_t *weights, size
 
     pthread_mutex_unlock(&g_f16_cache_mutex);
     return buf;
+}
+
+/* ========================================================================
+ * Weight Cache Marks
+ * The weight, bf16 and f16 caches are append-only and keyed by CPU pointer,
+ * so entries added after a mark belong to whatever was loaded after it.
+ * Rolling back to the mark drops exactly those entries, so a freed model's
+ * addresses cannot be matched by later allocations, while models loaded
+ * earlier keep their GPU copies.
+ * ======================================================================== */
+
+void iris_metal_mark_weight_caches(void) {
+    pthread_mutex_lock(&g_cache_mutex);
+    g_weight_cache_mark = g_weight_cache_count;
+    pthread_mutex_unlock(&g_cache_mutex);
+
+    pthread_mutex_lock(&g_bf16_cache_mutex);
+    g_bf16_cache_mark = g_bf16_cache_count;
+    pthread_mutex_unlock(&g_bf16_cache_mutex);
+
+    pthread_mutex_lock(&g_f16_cache_mutex);
+    g_f16_cache_mark = g_f16_cache_count;
+    pthread_mutex_unlock(&g_f16_cache_mutex);
+}
+
+void iris_metal_release_weight_caches_since_mark(void) {
+    if (!g_initialized) return;
+
+    @autoreleasepool {
+        if (g_in_batch) {
+            iris_metal_end_batch();
+        }
+        /* Drains in-flight work and drops transient state (rope, activations). */
+        iris_metal_reset_transient();
+
+        pthread_mutex_lock(&g_cache_mutex);
+        for (int i = g_weight_cache_mark; i < g_weight_cache_count; i++) {
+            g_weight_cache[i].gpu_buffer = nil;
+            g_weight_cache[i].cpu_ptr = NULL;
+        }
+        if (g_weight_cache_count > g_weight_cache_mark)
+            g_weight_cache_count = g_weight_cache_mark;
+        pthread_mutex_unlock(&g_cache_mutex);
+
+        pthread_mutex_lock(&g_bf16_cache_mutex);
+        for (int i = g_bf16_cache_mark; i < g_bf16_cache_count; i++) {
+            g_bf16_cache[i].gpu_buffer = nil;
+            g_bf16_cache[i].cpu_ptr = NULL;
+        }
+        if (g_bf16_cache_count > g_bf16_cache_mark)
+            g_bf16_cache_count = g_bf16_cache_mark;
+        pthread_mutex_unlock(&g_bf16_cache_mutex);
+
+        pthread_mutex_lock(&g_f16_cache_mutex);
+        for (int i = g_f16_cache_mark; i < g_f16_cache_count; i++) {
+            g_f16_cache[i].gpu_buffer = nil;
+            g_f16_cache[i].cpu_ptr = NULL;
+        }
+        if (g_f16_cache_count > g_f16_cache_mark)
+            g_f16_cache_count = g_f16_cache_mark;
+        pthread_mutex_unlock(&g_f16_cache_mutex);
+    }
 }
 
 /*

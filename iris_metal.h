@@ -47,6 +47,14 @@ void iris_metal_rope_cache_begin(void);
  */
 void iris_metal_reset_transient(void);
 
+/*
+ * Mark the weight caches, then later drop only the entries added since the
+ * mark. Mark before loading a model that will be freed while others stay
+ * resident (the text encoder); release after freeing it.
+ */
+void iris_metal_mark_weight_caches(void);
+void iris_metal_release_weight_caches_since_mark(void);
+
 /* Debug: Clear only specific caches (for isolating issues) */
 void iris_metal_clear_weight_cache_only(void);
 void iris_metal_clear_bf16_cache_only(void);
