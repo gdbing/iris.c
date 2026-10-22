@@ -310,6 +310,17 @@ static uint16_t *zi_concat3_bf16(const uint16_t *a, size_t na,
     return out;
 }
 
+/* Q (part 0), K (1) or V (2) rows of a block's fused [q;k;v] weight. */
+static const uint16_t *zi_qkv_slice(const zi_block_t *block, int dim, int part) {
+    return block->attn_qkv_weight_bf16 + (size_t)part * dim * dim;
+}
+
+/* W1 (part 0) or W3 (1) rows of a block's fused [w1;w3] weight. */
+static const uint16_t *zi_w13_slice(const zi_block_t *block, int dim, int ffn_dim,
+                                    int part) {
+    return block->ffn_w13_weight_bf16 + (size_t)part * ffn_dim * dim;
+}
+
 /* GPU linear projection writing into a preallocated f32 output tensor.
  * Tries bf16 weight path first (fast), falls back to f32 weights. The "into"
  * variant avoids allocating a new tensor each call, which matters when
@@ -988,15 +999,16 @@ static int zi_block_forward_gpu(iris_gpu_tensor_t hidden_gpu,
                                        scratch->gate_up, scratch->up,
                                        seq, dim, 0);
             } else {
-                /* Fallback to unfused projections on GPU if fused path fails. */
+                /* Fallback to unfused projections on GPU if fused path fails,
+                 * slicing Q, K and V rows out of the fused weight. */
                 if (!zi_gpu_linear_into_f32(scratch->q, scratch->norm,
-                                            block->attn_q_weight_bf16, block->attn_q_weight,
+                                            zi_qkv_slice(block, dim, 0), NULL,
                                             seq, dim, dim)) return 0;
                 if (!zi_gpu_linear_into_f32(scratch->k, scratch->norm,
-                                            block->attn_k_weight_bf16, block->attn_k_weight,
+                                            zi_qkv_slice(block, dim, 1), NULL,
                                             seq, dim, dim)) return 0;
                 if (!zi_gpu_linear_into_f32(scratch->v, scratch->norm,
-                                            block->attn_v_weight_bf16, block->attn_v_weight,
+                                            zi_qkv_slice(block, dim, 2), NULL,
                                             seq, dim, dim)) return 0;
             }
         } else {
@@ -1058,10 +1070,10 @@ static int zi_block_forward_gpu(iris_gpu_tensor_t hidden_gpu,
                                        seq, 0, ffn_dim);
             } else {
                 if (!zi_gpu_linear_into_f32(scratch->gate_up, scratch->norm,
-                                            block->ffn_w1_bf16, block->ffn_w1,
+                                            zi_w13_slice(block, dim, ffn_dim, 0), NULL,
                                             seq, dim, ffn_dim)) return 0;
                 if (!zi_gpu_linear_into_f32(scratch->up, scratch->norm,
-                                            block->ffn_w3_bf16, block->ffn_w3,
+                                            zi_w13_slice(block, dim, ffn_dim, 1), NULL,
                                             seq, dim, ffn_dim)) return 0;
             }
         } else {
@@ -1102,13 +1114,13 @@ static int zi_block_forward_gpu(iris_gpu_tensor_t hidden_gpu,
                                        seq, dim, 0);
             } else {
                 if (!zi_gpu_linear_into_f32(scratch->q, scratch->norm,
-                                            block->attn_q_weight_bf16, block->attn_q_weight,
+                                            zi_qkv_slice(block, dim, 0), NULL,
                                             seq, dim, dim)) return 0;
                 if (!zi_gpu_linear_into_f32(scratch->k, scratch->norm,
-                                            block->attn_k_weight_bf16, block->attn_k_weight,
+                                            zi_qkv_slice(block, dim, 1), NULL,
                                             seq, dim, dim)) return 0;
                 if (!zi_gpu_linear_into_f32(scratch->v, scratch->norm,
-                                            block->attn_v_weight_bf16, block->attn_v_weight,
+                                            zi_qkv_slice(block, dim, 2), NULL,
                                             seq, dim, dim)) return 0;
             }
         } else {
@@ -1163,10 +1175,10 @@ static int zi_block_forward_gpu(iris_gpu_tensor_t hidden_gpu,
                                        seq, 0, ffn_dim);
             } else {
                 if (!zi_gpu_linear_into_f32(scratch->gate_up, scratch->norm,
-                                            block->ffn_w1_bf16, block->ffn_w1,
+                                            zi_w13_slice(block, dim, ffn_dim, 0), NULL,
                                             seq, dim, ffn_dim)) return 0;
                 if (!zi_gpu_linear_into_f32(scratch->up, scratch->norm,
-                                            block->ffn_w3_bf16, block->ffn_w3,
+                                            zi_w13_slice(block, dim, ffn_dim, 1), NULL,
                                             seq, dim, ffn_dim)) return 0;
             }
         } else {
@@ -2106,6 +2118,19 @@ static int zi_load_block(zi_block_t *block, safetensors_file_t **files,
                                                        block->attn_v_weight_bf16, attn_mat_elems);
         block->ffn_w13_weight_bf16 = zi_concat_bf16(block->ffn_w1_bf16, ffn_mat_elems,
                                                     block->ffn_w3_bf16, ffn_mat_elems);
+
+        /* Once fused, the separate bf16 matrices are redundant: the fused
+         * buffers hold the same rows, and fallbacks slice into them. Keep the
+         * separate copies only if fusing failed. */
+        if (block->attn_qkv_weight_bf16) {
+            free(block->attn_q_weight_bf16); block->attn_q_weight_bf16 = NULL;
+            free(block->attn_k_weight_bf16); block->attn_k_weight_bf16 = NULL;
+            free(block->attn_v_weight_bf16); block->attn_v_weight_bf16 = NULL;
+        }
+        if (block->ffn_w13_weight_bf16) {
+            free(block->ffn_w1_bf16); block->ffn_w1_bf16 = NULL;
+            free(block->ffn_w3_bf16); block->ffn_w3_bf16 = NULL;
+        }
 
         /* Free f32 copies of large weights (keep small norm/adaln weights as f32) */
         free(block->attn_q_weight); block->attn_q_weight = NULL;
