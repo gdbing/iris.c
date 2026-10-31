@@ -4450,7 +4450,7 @@ int iris_gpu_attention_fused(iris_gpu_tensor_t out,
         [encoder setBytes:&num_heads length:sizeof(int) atIndex:6];
         [encoder setBytes:&head_dim length:sizeof(int) atIndex:7];
         [encoder setBytes:&scale length:sizeof(float) atIndex:8];
-        [encoder setThreadgroupMemoryLength:scores_size atIndex:0];
+        [encoder setThreadgroupMemoryLength:((scores_size + 15) & ~(NSUInteger)15) atIndex:0];
 
         NSUInteger threadsPerGroup = MIN(256, (NSUInteger)seq_k);
         [encoder dispatchThreadgroups:MTLSizeMake(seq_q, num_heads, 1)
@@ -4936,7 +4936,7 @@ int iris_gpu_attention_fused_bf16(iris_gpu_tensor_t out,
             [encoder setBytes:&num_heads length:sizeof(int) atIndex:6];
             [encoder setBytes:&head_dim length:sizeof(int) atIndex:7];
             [encoder setBytes:&scale length:sizeof(float) atIndex:8];
-            [encoder setThreadgroupMemoryLength:bf16_scores_size atIndex:0];
+            [encoder setThreadgroupMemoryLength:((bf16_scores_size + 15) & ~(NSUInteger)15) atIndex:0];
 
             /* Dispatch: one threadgroup per (query_pos, head) pair */
             NSUInteger threadsPerGroup = MIN(256, (NSUInteger)seq_k);
@@ -6216,7 +6216,7 @@ int iris_metal_attention_fused(float *out,
         [encoder setBytes:&num_heads length:sizeof(int) atIndex:6];
         [encoder setBytes:&head_dim length:sizeof(int) atIndex:7];
         [encoder setBytes:&scale length:sizeof(float) atIndex:8];
-        [encoder setThreadgroupMemoryLength:raw_scores_size atIndex:0];
+        [encoder setThreadgroupMemoryLength:((raw_scores_size + 15) & ~(NSUInteger)15) atIndex:0];
 
         /* Dispatch: one threadgroup per (query_pos, head) pair
          * Each threadgroup has threads for parallel reduction (softmax) */

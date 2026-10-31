@@ -15,6 +15,12 @@ using namespace metal;
 inline float bf16_to_f32(ushort bf16);
 inline ushort f32_to_bf16(float f32);
 
+/* Largest power of two below the thread count, so a tree reduction over a
+ * non-power-of-two threadgroup still visits every slot. */
+inline uint reduction_start_stride(uint threads) {
+    return threads > 1 ? (1u << (31 - clz(threads - 1))) : 0;
+}
+
 /* ========================================================================
  * RMSNorm: out[i] = x[i] * rsqrt(mean(x^2) + eps) * weight[i]
  * ======================================================================== */
@@ -48,8 +54,8 @@ kernel void rms_norm(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Parallel reduction for sum
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
+        if (tid < stride && tid + stride < threads) {
             shared_sum[tid] += shared_sum[tid + stride];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -144,8 +150,8 @@ kernel void adaln_norm(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Parallel reduction
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
+        if (tid < stride && tid + stride < threads) {
             shared_sum[tid] += shared_sum[tid + stride];
             shared_sum_sq[tid] += shared_sum_sq[tid + stride];
         }
@@ -315,8 +321,8 @@ kernel void softmax(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Reduce to find global max
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
+        if (tid < stride && tid + stride < threads) {
             shared_max[tid] = max(shared_max[tid], shared_max[tid + stride]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -335,8 +341,8 @@ kernel void softmax(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Reduce to find total sum
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
+        if (tid < stride && tid + stride < threads) {
             shared_sum[tid] += shared_sum[tid + stride];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -559,7 +565,7 @@ kernel void attention_fused(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // ========== Phase 2: Find global max ==========
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
         if (tid < stride && tid + stride < threads) {
             shared_max[tid] = max(shared_max[tid], shared_max[tid + stride]);
         }
@@ -579,7 +585,7 @@ kernel void attention_fused(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // ========== Phase 4: Find total sum ==========
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
         if (tid < stride && tid + stride < threads) {
             shared_sum[tid] += shared_sum[tid + stride];
         }
@@ -695,7 +701,7 @@ kernel void causal_attention_fused(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // ========== Phase 2: Find global max (parallel reduction) ==========
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
         if (tid < stride && tid + stride < threads) {
             shared_max[tid] = max(shared_max[tid], shared_max[tid + stride]);
         }
@@ -720,7 +726,7 @@ kernel void causal_attention_fused(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // ========== Phase 4: Find total sum (parallel reduction) ==========
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
         if (tid < stride && tid + stride < threads) {
             shared_sum[tid] += shared_sum[tid + stride];
         }
@@ -917,8 +923,8 @@ kernel void softmax_half(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Reduce to find global max
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
+        if (tid < stride && tid + stride < threads) {
             shared_max[tid] = max(shared_max[tid], shared_max[tid + stride]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -936,8 +942,8 @@ kernel void softmax_half(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Reduce sum
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
+        if (tid < stride && tid + stride < threads) {
             shared_sum[tid] += shared_sum[tid + stride];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1001,8 +1007,8 @@ kernel void rms_norm_bf16(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Parallel reduction
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
+        if (tid < stride && tid + stride < threads) {
             shared_sum[tid] += shared_sum[tid + stride];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1131,8 +1137,8 @@ kernel void adaln_norm_bf16(
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
+        if (tid < stride && tid + stride < threads) {
             shared_sum[tid] += shared_sum[tid + stride];
             shared_sum_sq[tid] += shared_sum_sq[tid + stride];
         }
@@ -1394,8 +1400,8 @@ kernel void softmax_bf16(
     shared_max[tid] = local_max;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
+        if (tid < stride && tid + stride < threads) {
             shared_max[tid] = max(shared_max[tid], shared_max[tid + stride]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1412,8 +1418,8 @@ kernel void softmax_bf16(
     shared_sum[tid] = local_sum;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
+        if (tid < stride && tid + stride < threads) {
             shared_sum[tid] += shared_sum[tid + stride];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1750,7 +1756,7 @@ kernel void attention_fused_bf16(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // ========== Phase 2: Find global max ==========
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
         if (tid < stride && tid + stride < threads) {
             shared_max[tid] = max(shared_max[tid], shared_max[tid + stride]);
         }
@@ -1770,7 +1776,7 @@ kernel void attention_fused_bf16(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // ========== Phase 4: Find total sum ==========
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
         if (tid < stride && tid + stride < threads) {
             shared_sum[tid] += shared_sum[tid + stride];
         }
@@ -1888,7 +1894,7 @@ kernel void causal_attention_fused_bf16(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // ========== Phase 2: Find global max (parallel reduction) ==========
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
         if (tid < stride && tid + stride < threads) {
             shared_max[tid] = max(shared_max[tid], shared_max[tid + stride]);
         }
@@ -1913,7 +1919,7 @@ kernel void causal_attention_fused_bf16(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // ========== Phase 4: Find total sum (parallel reduction) ==========
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
         if (tid < stride && tid + stride < threads) {
             shared_sum[tid] += shared_sum[tid + stride];
         }
@@ -2060,8 +2066,8 @@ kernel void group_norm_f32(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     /* Parallel reduction */
-    for (uint stride = threads / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
+    for (uint stride = reduction_start_stride(threads); stride > 0; stride >>= 1) {
+        if (tid < stride && tid + stride < threads) {
             shared_sum[tid] += shared_sum[tid + stride];
             shared_sum2[tid] += shared_sum2[tid + stride];
         }
